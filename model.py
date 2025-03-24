@@ -320,6 +320,9 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f"Unknown beta schedule: {beta_schedule}")
         
+        # Move betas to the correct device
+        betas = betas.to(device)
+        
         self.register_buffer('betas', betas)
         
         # Pre-compute diffusion parameters
@@ -343,7 +346,9 @@ class GaussianDiffusion(nn.Module):
         self.register_buffer('posterior_variance', posterior_variance)
         
         # Log calculation clipped for numerical stability
-        posterior_log_variance_clipped = torch.log(torch.max(posterior_variance, torch.tensor(1e-20, device=device)))
+        # Create minimum value tensor on the same device
+        min_val = torch.tensor(1e-20, device=device)
+        posterior_log_variance_clipped = torch.log(torch.max(posterior_variance, min_val))
         self.register_buffer('posterior_log_variance_clipped', posterior_log_variance_clipped)
         
         posterior_mean_coef1 = betas * torch.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)
