@@ -9,6 +9,8 @@ import time
 import datetime
 import matplotlib.pyplot as plt
 import numpy as np
+from skimage.metrics import structural_similarity as compare_ssim
+from skimage.metrics import peak_signal_noise_ratio as compare_psnr
 from dataset import SinogramDataset, create_dataloaders
 
 logger = logging.getLogger('train')
@@ -42,10 +44,6 @@ def save_visualization(incomplete, coarse_pred, refined, complete, step, log_dir
         ref = refined[i, 0].cpu().numpy()
         comp = complete[i, 0].cpu().numpy()
         
-        # Determine min/max for consistent scaling
-        # vmin = min(inc.min(), coarse.min(), ref.min(), comp.min())
-        # vmax = max(inc.max(), coarse.max(), ref.max(), comp.max())
-        
         # Plot
         axes[i, 0].imshow(inc, cmap='magma')
         axes[i, 0].set_title('Incomplete')
@@ -73,7 +71,7 @@ def save_visualization(incomplete, coarse_pred, refined, complete, step, log_dir
     return vis_path
 
 def compute_metrics(pred, target):
-    """Compute evaluation metrics"""
+    """Compute evaluation metrics using scikit-image"""
     # Move to CPU and convert to numpy
     pred_np = pred.detach().cpu().numpy()
     target_np = target.detach().cpu().numpy()
@@ -81,30 +79,19 @@ def compute_metrics(pred, target):
     # Mean Squared Error
     mse = np.mean((pred_np - target_np) ** 2)
     
+    # Compute data_range based on the ground truth
+    data_range = target_np.max() - target_np.min()
+    
     # Peak Signal-to-Noise Ratio
-    max_val = np.max(target_np)
-    psnr = 20 * np.log10(max_val / np.sqrt(mse)) if mse > 0 else 100
+    psnr_val = compare_psnr(target_np, pred_np, data_range=data_range)
     
-    # Structural Similarity Index (simplified)
-    # For a true SSIM calculation, consider using skimage.metrics.structural_similarity
-    c1 = (0.01 * max_val) ** 2
-    c2 = (0.03 * max_val) ** 2
-    
-    mu_x = np.mean(pred_np)
-    mu_y = np.mean(target_np)
-    
-    sigma_x = np.std(pred_np)
-    sigma_y = np.std(target_np)
-    
-    sigma_xy = np.mean((pred_np - mu_x) * (target_np - mu_y))
-    
-    ssim = ((2 * mu_x * mu_y + c1) * (2 * sigma_xy + c2)) / \
-           ((mu_x ** 2 + mu_y ** 2 + c1) * (sigma_x ** 2 + sigma_y ** 2 + c2))
+    # Structural Similarity Index
+    ssim_val = compare_ssim(target_np, pred_np, data_range=data_range)
     
     return {
         'mse': mse,
-        'psnr': psnr,
-        'ssim': ssim
+        'psnr': psnr_val,
+        'ssim': ssim_val
     }
 
 def train(
