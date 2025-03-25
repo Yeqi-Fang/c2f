@@ -1,3 +1,4 @@
+# train.py
 import os
 import logging
 import torch
@@ -202,7 +203,7 @@ def train(
                 coarse_loss = nn.MSELoss()(coarse_pred, complete)
                 
                 # Total loss
-                total_loss = coarse_loss + refine_loss
+                total_loss = 0.01 * coarse_loss + refine_loss
             
             # Backward pass with mixed precision
             scaler.scale(total_loss).backward()
