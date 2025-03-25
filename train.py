@@ -70,29 +70,49 @@ def save_visualization(incomplete, coarse_pred, refined, complete, step, log_dir
     logger.info(f"Visualization saved to {vis_path}")
     return vis_path
 
-def compute_metrics(pred, target):
-    """Compute evaluation metrics using scikit-image"""
-    # Move to CPU and convert to numpy
-    pred_np = pred.detach().cpu().numpy()
-    target_np = target.detach().cpu().numpy()
+def compute_metrics(pred, target, win_size=7):
+    """Compute evaluation metrics using scikit-image for each sample and average them.
     
-    # Mean Squared Error
-    mse = np.mean((pred_np - target_np) ** 2)
+    Args:
+        pred (torch.Tensor): Predicted images of shape (B, 1, H, W).
+        target (torch.Tensor): Ground truth images of shape (B, 1, H, W).
+        win_size (int): Window size for SSIM. Must be an odd integer less than or equal to the image dimensions.
     
-    # Compute data_range based on the ground truth
-    data_range = target_np.max() - target_np.min()
+    Returns:
+        dict: Dictionary with averaged 'mse', 'psnr', and 'ssim' values.
+    """
+    # Move to CPU and convert to numpy arrays
+    pred_np = pred.detach().cpu().numpy()   # shape: (B, 1, H, W)
+    target_np = target.detach().cpu().numpy()  # shape: (B, 1, H, W)
     
-    # Peak Signal-to-Noise Ratio
-    psnr_val = compare_psnr(target_np, pred_np, data_range=data_range)
-    print(target_np.shape)
-    # Structural Similarity Index
-    ssim_val = compare_ssim(target_np, pred_np, data_range=data_range)
+    batch_size = pred_np.shape[0]
+    mse_total, psnr_total, ssim_total = 0.0, 0.0, 0.0
+
+    for i in range(batch_size):
+        # Remove the channel dimension: now each image is (H, W)
+        pred_img = pred_np[i, 0]
+        target_img = target_np[i, 0]
+        
+        # Mean Squared Error for the sample
+        mse_sample = np.mean((pred_img - target_img) ** 2)
+        mse_total += mse_sample
+        
+        # Determine data_range based on ground truth
+        data_range = target_img.max() - target_img.min()
+        
+        # Compute PSNR and SSIM for the sample
+        psnr_sample = compare_psnr(target_img, pred_img, data_range=data_range)
+        ssim_sample = compare_ssim(target_img, pred_img, data_range=data_range, win_size=win_size)
+        psnr_total += psnr_sample
+        ssim_total += ssim_sample
+
+    # Average over the batch
+    mse_avg = mse_total / batch_size
+    psnr_avg = psnr_total / batch_size
+    ssim_avg = ssim_total / batch_size
     
-    return {
-        'mse': mse,
-        'psnr': psnr_val,
-        'ssim': ssim_val
-    }
+    return {'mse': mse_avg, 'psnr': psnr_avg, 'ssim': ssim_avg}
+
 
 def train(
     model,
