@@ -1,4 +1,4 @@
 python main.py --mode train --data_dir . --batch_size 16 --num_epochs 50 --lr 0.001 --gpu 0 --use_attention --diffusion_steps 1000 --sampling_steps 50 --light_factor 2 --cpm_type lighter
 
 
-python main.py --mode train --data_dir /mnt/d/fyq/sinogram/2e9div_smooth --batch_size 16 --num_epochs 50 --lr 0.001 --gpu 0 --use_attention --diffusion_steps 1000 --sampling_steps 50 --light_factor 2 --cpm_type lighter
+python main.py --mode train --data_dir /mnt/d/fyq/sinogram/2e9div_smooth --batch_size 16 --num_epochs 20 --gpu 0 --use_attention --diffusion_steps 1000 --sampling_steps 50 --light_factor 2 --cpm_type lighter --lr 5e-5

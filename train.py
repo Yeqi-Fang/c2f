@@ -84,7 +84,7 @@ def compute_metrics(pred, target):
     
     # Peak Signal-to-Noise Ratio
     psnr_val = compare_psnr(target_np, pred_np, data_range=data_range)
-    
+    print(target_np.shape)
     # Structural Similarity Index
     ssim_val = compare_ssim(target_np, pred_np, data_range=data_range)
     
