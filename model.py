@@ -46,52 +46,87 @@ def cosine_beta_schedule(timesteps, s=0.008):
 
 # --------------- U-Net Components ---------------
 
+# Update DoubleConv to include time conditioning
 class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels, mid_channels=None):
+    def __init__(self, in_channels, out_channels, mid_channels=None, time_emb_dim=None):
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
+        
+        self.time_emb_dim = time_emb_dim
+        
+        self.conv1 = nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False)
+        self.norm1 = nn.BatchNorm2d(mid_channels)
+        self.act1 = nn.ReLU(inplace=True)
+        
+        self.conv2 = nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.norm2 = nn.BatchNorm2d(out_channels)
+        self.act2 = nn.ReLU(inplace=True)
+        
+        # Add time embedding projection if specified
+        if time_emb_dim is not None:
+            self.time_mlp = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(time_emb_dim, out_channels)
+            )
 
-    def forward(self, x):
-        return self.double_conv(x)
+    def forward(self, x, time_emb=None):
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = self.act1(x)
+        
+        x = self.conv2(x)
+        x = self.norm2(x)
+        
+        # Add time embedding if provided
+        if self.time_emb_dim is not None and time_emb is not None:
+            time_condition = self.time_mlp(time_emb)
+            time_condition = time_condition.reshape(time_condition.shape[0], -1, 1, 1)
+            x = x + time_condition
+            
+        x = self.act2(x)
+        return x
 
+
+# Update Down to propagate time embeddings
 class Down(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, time_emb_dim=None):
         super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_channels, out_channels)
-        )
+        self.maxpool = nn.MaxPool2d(2)
+        self.conv = DoubleConv(in_channels, out_channels, time_emb_dim=time_emb_dim)
 
-    def forward(self, x):
-        return self.maxpool_conv(x)
+    def forward(self, x, time_emb=None):
+        x = self.maxpool(x)
+        x = self.conv(x, time_emb)
+        return x
 
+
+# Update Up to propagate time embeddings
 class Up(nn.Module):
-    def __init__(self, in_channels, skip_channels, out_channels, bilinear=True):
+    def __init__(self, in_channels, skip_channels, out_channels, bilinear=True, time_emb_dim=None):
         super().__init__()
+        
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-            self.conv = DoubleConv(in_channels + skip_channels, out_channels)
+            self.conv = DoubleConv(in_channels + skip_channels, out_channels, time_emb_dim=time_emb_dim)
         else:
-            self.up = nn.ConvTranspose2d(in_channels, skip_channels, kernel_size=2, stride=2)
-            self.conv = DoubleConv(skip_channels * 2, out_channels)
+            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+            self.conv = DoubleConv(in_channels, out_channels, time_emb_dim=time_emb_dim)
 
-    def forward(self, x1, x2):
+    def forward(self, x1, x2, time_emb=None):
         x1 = self.up(x1)
         # Pad x1 to match x2's spatial dimensions
         diffY = x2.size()[2] - x1.size()[2]
         diffX = x2.size()[3] - x1.size()[3]
         x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        
+        # Concatenate skip connection
         x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
+        
+        # Apply convolution with time embedding
+        x = self.conv(x, time_emb)
+        return x
+
 
 class AttentionGate(nn.Module):
     def __init__(self, F_g, F_l, F_int):
@@ -118,25 +153,28 @@ class AttentionGate(nn.Module):
         psi = self.psi(psi)
         return x * psi
 
+# Similarly update AttentionUp class
 class AttentionUp(nn.Module):
-    def __init__(self, in_channels, skip_channels, out_channels, bilinear=True):
+    def __init__(self, in_channels, skip_channels, out_channels, bilinear=True, time_emb_dim=None):
         super().__init__()
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-            self.conv = DoubleConv(in_channels + skip_channels, out_channels)
+            self.conv = DoubleConv(in_channels + skip_channels, out_channels, time_emb_dim=time_emb_dim)
         else:
-            self.up = nn.ConvTranspose2d(in_channels, skip_channels, kernel_size=2, stride=2)
-            self.conv = DoubleConv(skip_channels * 2, out_channels)
+            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+            self.conv = DoubleConv(in_channels, out_channels, time_emb_dim=time_emb_dim)
         self.attn = AttentionGate(F_g=skip_channels, F_l=skip_channels, F_int=out_channels // 2)
 
-    def forward(self, x1, x2):
+    def forward(self, x1, x2, time_emb=None):
         x1 = self.up(x1)
         diffY = x2.size()[2] - x1.size()[2]
         diffX = x2.size()[3] - x1.size()[3]
         x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
         x2 = self.attn(x1, x2)
         x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
+        x = self.conv(x, time_emb)
+        return x
+
 
 class OutConv(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -149,105 +187,76 @@ class OutConv(nn.Module):
 
 # --------------- UNet Model for CPM and IRM ---------------
 
+# Update UNet to include time embeddings
 class UNet(nn.Module):
-    def __init__(self, n_channels=1, n_classes=1, bilinear=False, attention=False, pretrain=False, light=0):
+    def __init__(self, n_channels=1, n_classes=1, bilinear=False, attention=False, light=0):
         super(UNet, self).__init__()
         self.n_channels = n_channels
         self.n_classes = n_classes
         self.bilinear = bilinear
         self.attention = attention
-        self.pretrain = pretrain
         self.light = light
         factor = 2 if bilinear else 1
+        
+        # Time embedding dimension
+        self.time_emb_dim = 256
+        self.time_embedding = TimeEmbedding(self.time_emb_dim)
 
-        if pretrain:
-            # Use pretrained ResNet34 encoder
-            import torchvision.models as models
-            from torchvision.models import ResNet34_Weights
+        # Define channels based on light factor
+        if self.light == 1:
+            # Lighter version
+            self.inc = DoubleConv(n_channels, 16, time_emb_dim=self.time_emb_dim)
+            self.down1 = Down(16, 32, time_emb_dim=self.time_emb_dim)
+            self.down2 = Down(32, 64, time_emb_dim=self.time_emb_dim)
+            self.down3 = Down(64, 128, time_emb_dim=self.time_emb_dim)
+            self.down4 = Down(128, 256 // factor, time_emb_dim=self.time_emb_dim)
             
-            resnet = models.resnet34(weights=ResNet34_Weights.DEFAULT)
-            
-            if n_channels != 3:
-                self.input_layer = nn.Conv2d(n_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-                self.input_layer.weight.data = torch.mean(resnet.conv1.weight.data, dim=1, keepdim=True).repeat(1, n_channels, 1, 1)
-            else:
-                self.input_layer = resnet.conv1
-            
-            self.bn1 = resnet.bn1
-            self.relu = resnet.relu
-            self.maxpool = resnet.maxpool
-            self.layer1 = resnet.layer1  # 64 channels
-            self.layer2 = resnet.layer2  # 128 channels
-            self.layer3 = resnet.layer3  # 256 channels
-            self.layer4 = resnet.layer4  # 512 channels
-
-            # Decoder
             if self.attention:
-                self.up1 = AttentionUp(512, 256, 256, bilinear)
-                self.up2 = AttentionUp(256, 128, 128, bilinear)
-                self.up3 = AttentionUp(128, 64, 64, bilinear)
-                self.up4 = AttentionUp(64, 64, 64, bilinear)
+                self.up1 = AttentionUp(256, 128, 128 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up2 = AttentionUp(128, 64, 64 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up3 = AttentionUp(64, 32, 32 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up4 = AttentionUp(32, 16, 16, bilinear, time_emb_dim=self.time_emb_dim)
             else:
-                self.up1 = Up(512, 256, 256, bilinear)
-                self.up2 = Up(256, 128, 128, bilinear)
-                self.up3 = Up(128, 64, 64, bilinear)
-                self.up4 = Up(64, 64, 64, bilinear)
+                self.up1 = Up(256, 128, 128 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up2 = Up(128, 64, 64 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up3 = Up(64, 32, 32 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up4 = Up(32, 16, 16, bilinear, time_emb_dim=self.time_emb_dim)
+        elif self.light == 2:
+            # Even lighter version
+            self.inc = DoubleConv(n_channels, 8, time_emb_dim=self.time_emb_dim)
+            self.down1 = Down(8, 16, time_emb_dim=self.time_emb_dim)
+            self.down2 = Down(16, 32, time_emb_dim=self.time_emb_dim)
+            self.down3 = Down(32, 64, time_emb_dim=self.time_emb_dim)
+            self.down4 = Down(64, 128 // factor, time_emb_dim=self.time_emb_dim)
+            
+            if self.attention:
+                self.up1 = AttentionUp(128, 64, 64 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up2 = AttentionUp(64, 32, 32 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up3 = AttentionUp(32, 16, 16 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up4 = AttentionUp(16, 8, 8, bilinear, time_emb_dim=self.time_emb_dim)
+            else:
+                self.up1 = Up(128, 64, 64 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up2 = Up(64, 32, 32 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up3 = Up(32, 16, 16 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up4 = Up(16, 8, 8, bilinear, time_emb_dim=self.time_emb_dim)
         else:
-            # Define channels based on light factor
-            if self.light == 1:
-                # Lighter version
-                self.inc = DoubleConv(n_channels, 16)
-                self.down1 = Down(16, 32)
-                self.down2 = Down(32, 64)
-                self.down3 = Down(64, 128)
-                self.down4 = Down(128, 256 // factor)
-                
-                if self.attention:
-                    self.up1 = AttentionUp(256, 128, 128 // factor, bilinear)
-                    self.up2 = AttentionUp(128, 64, 64 // factor, bilinear)
-                    self.up3 = AttentionUp(64, 32, 32 // factor, bilinear)
-                    self.up4 = AttentionUp(32, 16, 16, bilinear)
-                else:
-                    self.up1 = Up(256, 128, 128 // factor, bilinear)
-                    self.up2 = Up(128, 64, 64 // factor, bilinear)
-                    self.up3 = Up(64, 32, 32 // factor, bilinear)
-                    self.up4 = Up(32, 16, 16, bilinear)
-            elif self.light == 2:
-                # Even lighter version
-                self.inc = DoubleConv(n_channels, 8)
-                self.down1 = Down(8, 16)
-                self.down2 = Down(16, 32)
-                self.down3 = Down(32, 64)
-                self.down4 = Down(64, 128 // factor)
-                
-                if self.attention:
-                    self.up1 = AttentionUp(128, 64, 64 // factor, bilinear)
-                    self.up2 = AttentionUp(64, 32, 32 // factor, bilinear)
-                    self.up3 = AttentionUp(32, 16, 16 // factor, bilinear)
-                    self.up4 = AttentionUp(16, 8, 8, bilinear)
-                else:
-                    self.up1 = Up(128, 64, 64 // factor, bilinear)
-                    self.up2 = Up(64, 32, 32 // factor, bilinear)
-                    self.up3 = Up(32, 16, 16 // factor, bilinear)
-                    self.up4 = Up(16, 8, 8, bilinear)
+            # Standard UNet
+            self.inc = DoubleConv(n_channels, 64, time_emb_dim=self.time_emb_dim)
+            self.down1 = Down(64, 128, time_emb_dim=self.time_emb_dim)
+            self.down2 = Down(128, 256, time_emb_dim=self.time_emb_dim)
+            self.down3 = Down(256, 512, time_emb_dim=self.time_emb_dim)
+            self.down4 = Down(512, 1024 // factor, time_emb_dim=self.time_emb_dim)
+            
+            if self.attention:
+                self.up1 = AttentionUp(1024, 512, 512 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up2 = AttentionUp(512, 256, 256 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up3 = AttentionUp(256, 128, 128 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up4 = AttentionUp(128, 64, 64, bilinear, time_emb_dim=self.time_emb_dim)
             else:
-                # Standard UNet
-                self.inc = DoubleConv(n_channels, 64)
-                self.down1 = Down(64, 128)
-                self.down2 = Down(128, 256)
-                self.down3 = Down(256, 512)
-                self.down4 = Down(512, 1024 // factor)
-                
-                if self.attention:
-                    self.up1 = AttentionUp(1024, 512, 512 // factor, bilinear)
-                    self.up2 = AttentionUp(512, 256, 256 // factor, bilinear)
-                    self.up3 = AttentionUp(256, 128, 128 // factor, bilinear)
-                    self.up4 = AttentionUp(128, 64, 64, bilinear)
-                else:
-                    self.up1 = Up(1024, 512, 512 // factor, bilinear)
-                    self.up2 = Up(512, 256, 256 // factor, bilinear)
-                    self.up3 = Up(256, 128, 128 // factor, bilinear)
-                    self.up4 = Up(128, 64, 64, bilinear)
+                self.up1 = Up(1024, 512, 512 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up2 = Up(512, 256, 256 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up3 = Up(256, 128, 128 // factor, bilinear, time_emb_dim=self.time_emb_dim)
+                self.up4 = Up(128, 64, 64, bilinear, time_emb_dim=self.time_emb_dim)
         
         # Output convolution
         if light == 1:
@@ -262,37 +271,102 @@ class UNet(nn.Module):
     def forward(self, x, time_emb=None):
         x_in = x  # Store input for residual connection
         
-        if self.pretrain:
-            x = self.input_layer(x)
-            x = self.bn1(x)
-            x = self.relu(x)
-            x = self.maxpool(x)
-            x1 = x  # 64 channels
-            x2 = self.layer1(x1)  # 64 channels
-            x3 = self.layer2(x2)  # 128 channels
-            x4 = self.layer3(x3)  # 256 channels
-            x5 = self.layer4(x4)  # 512 channels
-        else:
-            x1 = self.inc(x)
-            x2 = self.down1(x1)
-            x3 = self.down2(x2)
-            x4 = self.down3(x3)
-            x5 = self.down4(x4)
+        # Process time embedding if provided
+        t_emb = None
+        if time_emb is not None:
+            t_emb = self.time_embedding(time_emb)
+        
 
-        # Skip connections in the decoder
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
+        x1 = self.inc(x, t_emb)
+        x2 = self.down1(x1, t_emb)
+        x3 = self.down2(x2, t_emb)
+        x4 = self.down3(x3, t_emb)
+        x5 = self.down4(x4, t_emb)
+        
+        x = self.up1(x5, x4, t_emb)
+        x = self.up2(x, x3, t_emb)
+        x = self.up3(x, x2, t_emb)
+        x = self.up4(x, x1, t_emb)
         x = self.outc(x)
+        # # Residual connection
+        # if self.use_residual:
+        #     if x.shape != x_in.shape:
+        #         x_in = F.interpolate(x_in, size=x.shape[2:], mode='bilinear', align_corners=True)
+        #     print((x+x_in).shape)
+        #     return x + x_in
+        # else:
+        #     return x
+        return x
 
-        # Residual connection
-        if self.use_residual:
-            if x.shape != x_in.shape:
-                x_in = F.interpolate(x_in, size=x.shape[2:], mode='bilinear', align_corners=True)
-            return x + x_in
-        else:
-            return x
+class ResnetBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, time_emb_dim=None):
+        super().__init__()
+        # 主要处理路径
+        self.block1 = nn.Sequential(
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        )
+        self.block2 = nn.Sequential(
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        )
+        
+        # 时间嵌入处理
+        if time_emb_dim is not None:
+            self.time_mlp = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(time_emb_dim, out_channels)
+            )
+        
+        # 残差连接通道调整（关键部分）
+        self.res_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+    
+    def forward(self, x, time_emb=None):
+        h = self.block1(x)
+        
+        # 注入时间嵌入
+        if hasattr(self, 'time_mlp') and time_emb is not None:
+            time_condition = self.time_mlp(time_emb)
+            time_condition = time_condition.reshape(time_condition.shape[0], -1, 1, 1)
+            h = h + time_condition
+            
+        h = self.block2(h)
+        
+        # 应用残差连接（带通道调整）
+        return h + self.res_conv(x)
+
+# Add these time embedding utilities
+class SinusoidalPositionEmbeddings(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, time):
+        device = time.device
+        half_dim = self.dim // 2
+        embeddings = math.log(10000) / (half_dim - 1)
+        embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
+        embeddings = time[:, None] * embeddings[None, :]
+        embeddings = torch.cat((torch.sin(embeddings), torch.cos(embeddings)), dim=-1)
+        return embeddings
+
+class TimeEmbedding(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        self.sinusoidal_embedding = SinusoidalPositionEmbeddings(dim)
+        self.linear1 = nn.Linear(dim, dim * 4)
+        self.activation = nn.SiLU()
+        self.linear2 = nn.Linear(dim * 4, dim)
+
+    def forward(self, time):
+        x = self.sinusoidal_embedding(time)
+        x = self.linear1(x)
+        x = self.activation(x)
+        x = self.linear2(x)
+        return x
 
 
 # --------------- Diffusion Model ---------------
@@ -384,7 +458,7 @@ class GaussianDiffusion(nn.Module):
         
         # Predict the noise
         predicted_noise = self.denoise_fn(torch.cat([condition, x_noisy], dim=1), t)
-        
+        print(noise.shape, predicted_noise.shape)
         # Calculate loss
         loss = self.loss_func(noise, predicted_noise)
         
@@ -465,6 +539,8 @@ class GaussianDiffusion(nn.Module):
         if t is None:
             t = torch.randint(0, self.timesteps, (b,), device=self.device).long()
         
+        print(x_start.shape, condition.shape, t.shape)
+        
         # Calculate loss
         return self.p_losses(x_start, condition, t)
 
@@ -477,7 +553,7 @@ class CoarseToFineDiffusion(nn.Module):
         cpm_type='unet',
         attention=False,
         pretrain=False,
-        light=0,
+        light=2,
         diffusion_steps=1000,
         beta_schedule='linear',
         beta_start=1e-4,
@@ -610,3 +686,5 @@ class CoarseToFineDiffusion(nn.Module):
         refined_prediction = coarse_pred + predicted_residual
         
         return coarse_pred, predicted_residual, refined_prediction
+    
+    
