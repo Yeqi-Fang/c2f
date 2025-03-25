@@ -93,7 +93,7 @@ class Down(nn.Module):
     def __init__(self, in_channels, out_channels, time_emb_dim=None):
         super().__init__()
         self.maxpool = nn.MaxPool2d(2)
-        self.conv = DoubleConv(in_channels, out_channels, time_emb_dim=time_emb_dim)
+        self.conv = ResnetBlock(in_channels, out_channels, time_emb_dim=time_emb_dim)
 
     def forward(self, x, time_emb=None):
         x = self.maxpool(x)
@@ -108,10 +108,10 @@ class Up(nn.Module):
         
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-            self.conv = DoubleConv(in_channels + skip_channels, out_channels, time_emb_dim=time_emb_dim)
+            self.conv = ResnetBlock(in_channels + skip_channels, out_channels, time_emb_dim=time_emb_dim)
         else:
             self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels, time_emb_dim=time_emb_dim)
+            self.conv = ResnetBlock(in_channels, out_channels, time_emb_dim=time_emb_dim)
 
     def forward(self, x1, x2, time_emb=None):
         x1 = self.up(x1)
@@ -159,10 +159,10 @@ class AttentionUp(nn.Module):
         super().__init__()
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-            self.conv = DoubleConv(in_channels + skip_channels, out_channels, time_emb_dim=time_emb_dim)
+            self.conv = ResnetBlock(in_channels + skip_channels, out_channels, time_emb_dim=time_emb_dim)
         else:
             self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels, time_emb_dim=time_emb_dim)
+            self.conv = ResnetBlock(in_channels, out_channels, time_emb_dim=time_emb_dim)
         self.attn = AttentionGate(F_g=skip_channels, F_l=skip_channels, F_int=out_channels // 2)
 
     def forward(self, x1, x2, time_emb=None):
@@ -205,7 +205,7 @@ class UNet(nn.Module):
         # Define channels based on light factor
         if self.light == 1:
             # Lighter version
-            self.inc = DoubleConv(n_channels, 16, time_emb_dim=self.time_emb_dim)
+            self.inc = ResnetBlock(n_channels, 16, time_emb_dim=self.time_emb_dim)
             self.down1 = Down(16, 32, time_emb_dim=self.time_emb_dim)
             self.down2 = Down(32, 64, time_emb_dim=self.time_emb_dim)
             self.down3 = Down(64, 128, time_emb_dim=self.time_emb_dim)
@@ -223,7 +223,7 @@ class UNet(nn.Module):
                 self.up4 = Up(32, 16, 16, bilinear, time_emb_dim=self.time_emb_dim)
         elif self.light == 2:
             # Even lighter version
-            self.inc = DoubleConv(n_channels, 8, time_emb_dim=self.time_emb_dim)
+            self.inc = ResnetBlock(n_channels, 8, time_emb_dim=self.time_emb_dim)
             self.down1 = Down(8, 16, time_emb_dim=self.time_emb_dim)
             self.down2 = Down(16, 32, time_emb_dim=self.time_emb_dim)
             self.down3 = Down(32, 64, time_emb_dim=self.time_emb_dim)
@@ -241,7 +241,7 @@ class UNet(nn.Module):
                 self.up4 = Up(16, 8, 8, bilinear, time_emb_dim=self.time_emb_dim)
         else:
             # Standard UNet
-            self.inc = DoubleConv(n_channels, 64, time_emb_dim=self.time_emb_dim)
+            self.inc = ResnetBlock(n_channels, 64, time_emb_dim=self.time_emb_dim)
             self.down1 = Down(64, 128, time_emb_dim=self.time_emb_dim)
             self.down2 = Down(128, 256, time_emb_dim=self.time_emb_dim)
             self.down3 = Down(256, 512, time_emb_dim=self.time_emb_dim)
@@ -266,7 +266,7 @@ class UNet(nn.Module):
         else:
             self.outc = OutConv(64, n_classes)
             
-        self.use_residual = True
+        # self.use_residual = True
 
     def forward(self, x, time_emb=None):
         x_in = x  # Store input for residual connection
@@ -299,42 +299,46 @@ class UNet(nn.Module):
         return x
 
 class ResnetBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, time_emb_dim=None):
+    def __init__(self, in_channels, out_channels, time_emb_dim=None, groups=32, dropout=0):
         super().__init__()
-        # 主要处理路径
-        self.block1 = nn.Sequential(
-            nn.BatchNorm2d(in_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        )
-        self.block2 = nn.Sequential(
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        )
+        
+        groups = groups if in_channels % groups == 0 else 1
+        
+        self.norm1 = nn.GroupNorm(groups, in_channels)
+        self.act1 = nn.SiLU()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        groups = groups if out_channels % groups == 0 else 1
+        self.norm2 = nn.GroupNorm(groups, out_channels)
+        self.act2 = nn.SiLU()
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        
+        # 通道调整卷积（用于残差连接）
+        self.res_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False) if in_channels != out_channels else nn.Identity()
         
         # 时间嵌入处理
+        self.time_emb_dim = time_emb_dim
         if time_emb_dim is not None:
             self.time_mlp = nn.Sequential(
                 nn.SiLU(),
                 nn.Linear(time_emb_dim, out_channels)
             )
-        
-        # 残差连接通道调整（关键部分）
-        self.res_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
     
     def forward(self, x, time_emb=None):
-        h = self.block1(x)
+        h = self.act1(self.norm1(x))
+        h = self.conv1(h)
         
-        # 注入时间嵌入
-        if hasattr(self, 'time_mlp') and time_emb is not None:
+        # 添加时间嵌入（如果提供）
+        if self.time_emb_dim is not None and time_emb is not None:
             time_condition = self.time_mlp(time_emb)
             time_condition = time_condition.reshape(time_condition.shape[0], -1, 1, 1)
             h = h + time_condition
-            
-        h = self.block2(h)
         
-        # 应用残差连接（带通道调整）
+        h = self.act2(self.norm2(h))
+        h = self.dropout(h)
+        h = self.conv2(h)
+        
+        # 应用残差连接
         return h + self.res_conv(x)
 
 # Add these time embedding utilities
@@ -432,7 +436,7 @@ class GaussianDiffusion(nn.Module):
         self.register_buffer('posterior_mean_coef2', posterior_mean_coef2)
         
         # Loss function
-        self.loss_func = nn.L1Loss(reduction='mean')
+        self.loss_func = nn.MSELoss(reduction='mean')
 
     def q_sample(self, x_start, t, noise=None):
         """
@@ -458,7 +462,7 @@ class GaussianDiffusion(nn.Module):
         
         # Predict the noise
         predicted_noise = self.denoise_fn(torch.cat([condition, x_noisy], dim=1), t)
-        print(noise.shape, predicted_noise.shape)
+        # print(noise.shape, predicted_noise.shape)
         # Calculate loss
         loss = self.loss_func(noise, predicted_noise)
         
@@ -539,7 +543,7 @@ class GaussianDiffusion(nn.Module):
         if t is None:
             t = torch.randint(0, self.timesteps, (b,), device=self.device).long()
         
-        print(x_start.shape, condition.shape, t.shape)
+        # print(x_start.shape, condition.shape, t.shape)
         
         # Calculate loss
         return self.p_losses(x_start, condition, t)
@@ -569,7 +573,6 @@ class CoarseToFineDiffusion(nn.Module):
                 n_classes=1,
                 bilinear=False,
                 attention=attention,
-                pretrain=pretrain,
                 light=light
             )
         elif cpm_type == 'resnet':
@@ -600,7 +603,6 @@ class CoarseToFineDiffusion(nn.Module):
                 n_classes=1,
                 bilinear=False,
                 attention=False,
-                pretrain=False,
                 light=max(1, light)  # Always use at least light=1
             )
         
@@ -611,7 +613,6 @@ class CoarseToFineDiffusion(nn.Module):
             n_classes=1,   # Predicted noise
             bilinear=False,
             attention=attention,
-            pretrain=False,
             light=light
         )
         

@@ -43,23 +43,23 @@ def save_visualization(incomplete, coarse_pred, refined, complete, step, log_dir
         comp = complete[i, 0].cpu().numpy()
         
         # Determine min/max for consistent scaling
-        vmin = min(inc.min(), coarse.min(), ref.min(), comp.min())
-        vmax = max(inc.max(), coarse.max(), ref.max(), comp.max())
+        # vmin = min(inc.min(), coarse.min(), ref.min(), comp.min())
+        # vmax = max(inc.max(), coarse.max(), ref.max(), comp.max())
         
         # Plot
-        axes[i, 0].imshow(inc, cmap='magma', vmin=vmin, vmax=vmax)
+        axes[i, 0].imshow(inc, cmap='magma')
         axes[i, 0].set_title('Incomplete')
         axes[i, 0].axis('off')
         
-        axes[i, 1].imshow(coarse, cmap='magma', vmin=vmin, vmax=vmax)
+        axes[i, 1].imshow(coarse, cmap='magma')
         axes[i, 1].set_title('Coarse Prediction')
         axes[i, 1].axis('off')
         
-        axes[i, 2].imshow(ref, cmap='magma', vmin=vmin, vmax=vmax)
+        axes[i, 2].imshow(ref, cmap='magma')
         axes[i, 2].set_title('Refined Prediction')
         axes[i, 2].axis('off')
         
-        axes[i, 3].imshow(comp, cmap='magma', vmin=vmin, vmax=vmax)
+        axes[i, 3].imshow(comp, cmap='magma')
         axes[i, 3].set_title('Ground Truth')
         axes[i, 3].axis('off')
     
@@ -192,7 +192,7 @@ def train(
                 coarse_pred, refine_loss = model(incomplete, complete)
                 
                 # Coarse prediction loss
-                coarse_loss = nn.L1Loss()(coarse_pred, complete)
+                coarse_loss = nn.MSELoss()(coarse_pred, complete)
                 
                 # Total loss
                 total_loss = coarse_loss + refine_loss
@@ -301,7 +301,7 @@ def validate(model, val_loader, device, sampling_steps, log_dir, epoch):
                 metrics_refined[k] += batch_metrics_refined[k]
             
             # Calculate loss
-            coarse_loss = nn.L1Loss()(coarse_pred, complete)
+            coarse_loss = nn.MSELoss()(coarse_pred, complete)
             total_loss = coarse_loss + refine_loss
             val_loss += total_loss.item()
             
